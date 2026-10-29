@@ -276,6 +276,17 @@ void NWM_UDS::HandleEAPoLPacket(const Network::WifiPacket& packet) {
         SignalEventAsync(connection_status_event);
     } else if (connection_status.status == NetworkStatus::Connecting) {
         auto logoff = ParseEAPoLLogoffFrame(packet.data);
+        if (packet.transmitter_address != network_info.host_mac_address) {
+            return;
+        }
+        const auto local_mac = GetMacAddress();
+        const auto own_node = node_map.find(local_mac);
+        const u16 mapped_node_id = own_node == node_map.end() ? 0 : own_node->second.node_id;
+        if (!IsEAPoLLogoffForClient(logoff, local_mac, conn_type, mapped_node_id)) {
+            // Join responses are also broadcast as membership updates. Another connecting
+            // client must not adopt the new client's assigned node ID.
+            return;
+        }
 
         network_info.host_mac_address = packet.transmitter_address;
         network_info.total_nodes = logoff.connected_nodes;
@@ -321,6 +332,9 @@ void NWM_UDS::HandleEAPoLPacket(const Network::WifiPacket& packet) {
         // On a 3ds this packet wouldn't be addressed to already connected clients
         // We use this information because in the current implementation the host
         // isn't broadcasting the node information
+        if (packet.transmitter_address != network_info.host_mac_address) {
+            return;
+        }
         auto logoff = ParseEAPoLLogoffFrame(packet.data);
 
         network_info.total_nodes = logoff.connected_nodes;
@@ -1261,39 +1275,12 @@ void NWM_UDS::PullPacket(Kernel::HLERequestContext& ctx) {
     u32 max_out_buff_size = rp.Pop<u32>();
     std::vector<u8> output_buffer;
 
-    SecureDataHeader secure_data;
+    SecureDataHeader secure_data{};
 
     auto ret = PullPacketHLE(bind_node_id, max_out_buff_size, max_out_buff_size_aligned,
                              output_buffer, &secure_data);
 
-    switch (ret.error()) {
-    case ResultStatus::RecvError_NotConnected: {
-        IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
-        rb.Push(Result(ErrorDescription::NotAuthorized, ErrorModule::UDS,
-                       ErrorSummary::InvalidState, ErrorLevel::Status));
-        return;
-    }
-    case ResultStatus::RecvError_BadNode: {
-        IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
-        rb.Push(Result(ErrorDescription::NotAuthorized, ErrorModule::UDS,
-                       ErrorSummary::InvalidState, ErrorLevel::Status));
-        return;
-    }
-    case ResultStatus::RecvError_PacketSizeTooLarge: {
-        IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
-        rb.Push(Result(ErrorDescription::TooLarge, ErrorModule::UDS, ErrorSummary::WrongArgument,
-                       ErrorLevel::Usage));
-        return;
-    }
-    default:;
-    }
-
-    IPC::RequestBuilder rb = rp.MakeBuilder(3, 2);
-
-    rb.Push(ResultSuccess);
-    rb.Push<u32>(*ret);
-    rb.Push<u16>(secure_data.src_node_id);
-    rb.PushStaticBuffer(std::move(output_buffer), 0);
+    WritePullPacketResponse(ctx, ret, secure_data, std::move(output_buffer));
 }
 
 Common::Expected<int, ResultStatus> NWM_UDS::PullPacketHLE(u32 bind_node_id, u32 max_out_buff_size,

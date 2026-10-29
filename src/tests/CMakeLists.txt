@@ -1,10 +1,12 @@
 add_executable(tests
+    network/room.cpp
     common/bit_field.cpp
     common/file_util.cpp
     common/param_package.cpp
     core/core_timing.cpp
     core/file_sys/path_parser.cpp
     core/hle/kernel/hle_ipc.cpp
+    core/hle/service/nwm/uds_data.cpp
     core/memory/memory.cpp
     core/memory/vm_manager.cpp
     precompiled_headers.h

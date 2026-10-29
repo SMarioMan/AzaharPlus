@@ -69,11 +69,11 @@ private:
         ClientState() {
             rate_timer.Start();
         }
-        bool needs_content_download;
-        bool can_download_next_block;
-        bool sent_next_block_req;
-        bool is_accepted;
-        u8 pk_seq_num;
+        bool needs_content_download{};
+        bool can_download_next_block{};
+        bool sent_next_block_req{};
+        bool is_accepted{};
+        u8 pk_seq_num{};
         void IncrSeqNum() {
             pk_seq_num++;
         }
@@ -85,17 +85,17 @@ private:
             rate_timer.Update();
             return false;
         }
-        u32 dlp_units_total;
+        u32 dlp_units_total{};
         u32 GetDlpUnitsDownloaded() {
             return current_content_block * dlp_content_block_length;
         }
-        u32 current_content_block;
+        u32 current_content_block{};
         u32 GetTotalFragIndex(u8 block_frag_index) {
             return current_content_block * dlp_content_block_length + block_frag_index;
         }
-        u8 network_node_id;
-        std::array<u8, 2> resp_id;
-        u16 next_req_ack;
+        u8 network_node_id{};
+        std::array<u8, 2> resp_id{};
+        u16 next_req_ack{};
 
         std::array<u8, 3> GetPkRespId() {
             return {pk_seq_num, resp_id[0], resp_id[1]};
@@ -146,7 +146,7 @@ private:
             DoesNotNeedContent,
             DistributeDone,
             SentPassphrase,
-        } state;
+        } state = NotJoined;
     };
 
     std::vector<ClientState> client_states;
