@@ -36,7 +36,27 @@ TEST_CASE("UDS concurrent joins only accept their own assigned node ID", "[core]
         CHECK_FALSE(IsEAPoLLogoffForClient(legacy_packet, recipient, ConnectionType::Client, 0));
         CHECK_FALSE(IsEAPoLLogoffForClient(legacy_packet, recipient, ConnectionType::Client,
                                            joining == 8 ? 2 : joining + 1));
-        CHECK(IsEAPoLLogoffForClient(legacy_packet, recipient, ConnectionType::Spectator, 0));
+        CHECK_FALSE(IsEAPoLLogoffForClient(legacy_packet, recipient, ConnectionType::Spectator, 0));
+    }
+}
+
+TEST_CASE("UDS rejects stale responses from a different connection type", "[core][nwm]") {
+    const MacAddress local{0, 0x1F, 0x32, 0, 0, 2};
+    EAPoLLogoffPacket packet{};
+    packet.max_nodes = 8;
+    for (const auto recipient : {local, MacAddress{}}) {
+        packet.client_mac_address = recipient;
+        packet.assigned_node_id = NodeIDSpec;
+        CHECK(IsEAPoLLogoffForClient(packet, local, ConnectionType::Spectator, 0));
+        CHECK_FALSE(IsEAPoLLogoffForClient(packet, local, ConnectionType::Client, 2));
+        for (const u16 invalid_node : {1, 9, 0xFFFF}) {
+            packet.assigned_node_id = invalid_node;
+            CHECK_FALSE(
+                IsEAPoLLogoffForClient(packet, local, ConnectionType::Client, invalid_node));
+        }
+        packet.assigned_node_id = 2;
+        CHECK(IsEAPoLLogoffForClient(packet, local, ConnectionType::Client, 2));
+        CHECK_FALSE(IsEAPoLLogoffForClient(packet, local, ConnectionType::Spectator, 0));
     }
 }
 
