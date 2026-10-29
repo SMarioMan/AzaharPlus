@@ -372,6 +372,15 @@ std::vector<u8> GenerateEAPoLLogoffFrame(const MacAddress& mac_address, u16 netw
 
 bool IsEAPoLLogoffForClient(const EAPoLLogoffPacket& packet, const MacAddress& local_mac,
                             ConnectionType type, u16 mapped_node_id) {
+    // A scan can be cancelled while its spectator join response is still in flight.
+    // Do not let that response complete a subsequent client connection to the same host.
+    if (type == ConnectionType::Client &&
+        (packet.assigned_node_id < 2 || packet.assigned_node_id > packet.max_nodes)) {
+        return false;
+    }
+    if (type == ConnectionType::Spectator && packet.assigned_node_id != NodeIDSpec) {
+        return false;
+    }
     if (packet.client_mac_address != MacAddress{}) {
         return packet.client_mac_address == local_mac;
     }
