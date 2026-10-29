@@ -11,6 +11,7 @@
 #include <cryptopp/filters.h>
 #include <cryptopp/md5.h>
 #include <cryptopp/modes.h>
+#include "core/hle/ipc_helpers.h"
 #include "core/hle/service/nwm/nwm_uds.h"
 #include "core/hle/service/nwm/uds_data.h"
 #include "core/hw/aes/key.h"
@@ -345,6 +346,7 @@ NodeInfo DeserializeNodeInfo(const EAPoLNodeInfo& node) {
 std::vector<u8> GenerateEAPoLLogoffFrame(const MacAddress& mac_address, u16 network_node_id,
                                          const NodeList& nodes, u8 max_nodes, u8 total_nodes) {
     EAPoLLogoffPacket eapol_logoff{};
+    eapol_logoff.client_mac_address = mac_address;
     eapol_logoff.assigned_node_id = network_node_id;
     eapol_logoff.connected_nodes = total_nodes;
     eapol_logoff.max_nodes = max_nodes;
@@ -368,6 +370,17 @@ std::vector<u8> GenerateEAPoLLogoffFrame(const MacAddress& mac_address, u16 netw
     return buffer;
 }
 
+bool IsEAPoLLogoffForClient(const EAPoLLogoffPacket& packet, const MacAddress& local_mac,
+                            ConnectionType type, u16 mapped_node_id) {
+    if (packet.client_mac_address != MacAddress{}) {
+        return packet.client_mac_address == local_mac;
+    }
+    // Older Citra hosts omit the recipient MAC. Their preceding node map still identifies
+    // the assigned client, and spectators do not consume an assigned node ID.
+    return type == ConnectionType::Spectator ||
+           (mapped_node_id != 0 && packet.assigned_node_id == mapped_node_id);
+}
+
 EAPoLLogoffPacket ParseEAPoLLogoffFrame(std::span<const u8> frame) {
     EAPoLLogoffPacket eapol_logoff;
 
@@ -381,6 +394,35 @@ EAPoLStartPacket DeserializeEAPolStartPacket(std::span<const u8> frame) {
 
     std::memcpy(&eapol_start, frame.data() + sizeof(LLCHeader), sizeof(eapol_start));
     return eapol_start;
+}
+
+void WritePullPacketResponse(Kernel::HLERequestContext& ctx,
+                             const Common::Expected<int, ResultStatus>& ret,
+                             const SecureDataHeader& secure_data, std::vector<u8> output_buffer) {
+    if (!ret) {
+        IPC::RequestBuilder rb(ctx, 1, 0);
+        switch (ret.error()) {
+        case ResultStatus::RecvError_NotConnected:
+        case ResultStatus::RecvError_BadNode:
+            rb.Push(Result(ErrorDescription::NotAuthorized, ErrorModule::UDS,
+                           ErrorSummary::InvalidState, ErrorLevel::Status));
+            break;
+        case ResultStatus::RecvError_PacketSizeTooLarge:
+            rb.Push(Result(ErrorDescription::TooLarge, ErrorModule::UDS,
+                           ErrorSummary::WrongArgument, ErrorLevel::Usage));
+            break;
+        default:
+            UNREACHABLE_MSG("Unexpected UDS receive error {}", static_cast<int>(ret.error()));
+        }
+        return;
+    }
+
+    IPC::RequestBuilder rb(ctx, 3, 2);
+
+    rb.Push(ResultSuccess);
+    rb.Push<u32>(*ret);
+    rb.Push<u16>(*ret == 0 ? 0 : static_cast<u16>(secure_data.src_node_id));
+    rb.PushStaticBuffer(std::move(output_buffer), 0);
 }
 
 } // namespace Service::NWM

@@ -8,6 +8,7 @@
 #include <span>
 #include <vector>
 #include "common/common_types.h"
+#include "common/expected.h"
 #include "common/swap.h"
 #include "core/hle/service/nwm/uds_beacon.h"
 #include "core/hle/service/nwm/uds_common.h"
@@ -170,6 +171,17 @@ std::vector<u8> GenerateEAPoLLogoffFrame(const MacAddress& mac_address, u16 netw
 /*
  * Returns a EAPoLLogoffPacket representing the specified 802.11-encapsulated data frame.
  */
+/// Match a join response to its recipient, including the legacy node-map fallback.
+bool IsEAPoLLogoffForClient(const EAPoLLogoffPacket& packet, const MacAddress& local_mac,
+                            ConnectionType type, u16 mapped_node_id);
+
 EAPoLLogoffPacket ParseEAPoLLogoffFrame(std::span<const u8> frame);
+
+enum class ResultStatus;
+
+/// Encode the UDS PullPacket IPC reply, preserving successful payload lengths and receive errors.
+void WritePullPacketResponse(Kernel::HLERequestContext& ctx,
+                             const Common::Expected<int, ResultStatus>& result,
+                             const SecureDataHeader& secure_data, std::vector<u8> output_buffer);
 
 } // namespace Service::NWM

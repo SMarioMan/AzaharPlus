@@ -46,6 +46,12 @@ void DLP_Clt_Base::InitializeCltBase(u32 shared_mem_size, u32 max_beacons, u32 c
 }
 
 void DLP_Clt_Base::FinalizeCltBase() {
+    {
+        std::scoped_lock lock(beacon_mutex);
+        is_scanning = false;
+        system.CoreTiming().UnscheduleEvent(beacon_scan_event, 0);
+        CancelPendingTitleInfo();
+    }
     clt_state = DLP_Clt_State::Initialized;
 
     if (is_connected) {
@@ -158,6 +164,7 @@ void DLP_Clt_Base::StopScan(Kernel::HLERequestContext& ctx) {
         std::scoped_lock lock{beacon_mutex, clt_state_mutex};
         clt_state = DLP_Clt_State::Initialized;
         is_scanning = false;
+        CancelPendingTitleInfo();
 
         LOG_INFO(Service_DLP, "Ending scan worker");
 
@@ -452,113 +459,117 @@ void DLP_Clt_Base::BeaconScanCallback(std::uintptr_t user_data, s64 cycles_late)
         return;
     }
 
-    auto uds = GetUDS();
-    Common::Timer beacon_parse_timer_total;
-
-    // sadly, we have to impl the scan code ourselves
-    // because the nwm recvbeaconbroadcastdata function
-    // has a timeout in it, which won't work here because
-    // we don't have a uds server/client session
-    auto beacons = uds->GetReceivedBeacons(Network::BroadcastMac);
-
-    beacon_parse_timer_total.Start();
-
-    for (auto& beacon : beacons) {
-        if (auto idx = GetCachedTitleInfoIdx(beacon.transmitter_address); idx != -1) {
-            // update server info from beacon
-            auto b = GetDLPServerInfoFromRawBeacon(beacon);
-            scanned_title_info[idx].second.clients_joined =
-                b.clients_joined; // we only want to update clients joined
-            continue;
+    if (pending_title_info) {
+        CacheBeaconTitleInfo(pending_title_info->beacon);
+    } else {
+        auto beacons = GetUDS()->GetReceivedBeacons(Network::BroadcastMac);
+        for (auto& beacon : beacons) {
+            if (auto idx = GetCachedTitleInfoIdx(beacon.transmitter_address); idx != -1) {
+                scanned_title_info[idx].second.clients_joined =
+                    GetDLPServerInfoFromRawBeacon(beacon).clients_joined;
+                continue;
+            }
+            if (scanned_title_info.size() >= max_title_info) {
+                break;
+            }
+            if (ignore_servers_list[beacon.transmitter_address]) {
+                continue;
+            }
+            CacheBeaconTitleInfo(beacon);
+            break; // Only one spectator connection can use UDS at a time.
         }
-        if (scanned_title_info.size() >= max_title_info) {
-            break;
-        }
-        if (ignore_servers_list[beacon.transmitter_address]) {
-            continue;
-        }
-
-        CacheBeaconTitleInfo(beacon);
     }
 
-    // set our next scan interval
-    system.CoreTiming().ScheduleEvent(
-        msToCycles(std::max<int>(100, beacon_scan_interval_ms -
-                                          beacon_parse_timer_total.GetTimeElapsed().count())) -
-            cycles_late,
-        beacon_scan_event, 0);
+    // Poll without blocking the emulation thread. Network callbacks advance the connection,
+    // while guest execution and other timing events must continue between polls.
+    const int interval_ms = pending_title_info ? 10 : beacon_scan_interval_ms;
+    system.CoreTiming().ScheduleEvent(msToCycles(interval_ms), beacon_scan_event, 0);
 }
 
-void DLP_Clt_Base::CacheBeaconTitleInfo(Network::WifiPacket& beacon) {
-    // connect to the network as a spectator
-    // and receive dlp data
+void DLP_Clt_Base::CancelPendingTitleInfo() {
+    if (!pending_title_info) {
+        return;
+    }
+    if (auto uds = GetUDS()) {
+        if (pending_title_info->receiving) {
+            uds->UnbindHLE(dlp_bind_node_id);
+        }
+        uds->DisconnectNetworkHLE();
+    }
+    pending_title_info.reset();
+}
 
+void DLP_Clt_Base::CacheBeaconTitleInfo(Network::WifiPacket& incoming_beacon) {
     auto uds = GetUDS();
+    const auto now = system.CoreTiming().GetGlobalTimeUs();
+    if (!pending_title_info) {
+        pending_title_info.emplace();
+        pending_title_info->beacon = incoming_beacon;
+        pending_title_info->deadline = now + std::chrono::seconds(3);
 
-    NWM::NetworkInfo net_info;
-    net_info.host_mac_address = beacon.transmitter_address;
-    net_info.channel = dlp_net_info_channel;
-    net_info.initialized = true;
-    net_info.oui_value = NWM::NintendoOUI;
-
-    if (!ConnectToNetworkAsync(net_info, NWM::ConnectionType::Spectator, dlp_password_buf)) {
-        LOG_ERROR(Service_DLP, "Could not connect to network.");
+        NWM::NetworkInfo net_info{};
+        net_info.host_mac_address = incoming_beacon.transmitter_address;
+        net_info.channel = dlp_net_info_channel;
+        net_info.initialized = true;
+        net_info.oui_value = NWM::NintendoOUI;
+        uds->connection_event =
+            system.Kernel().CreateEvent(Kernel::ResetType::OneShot, "dlp_connect_to_beacon");
+        uds->ConnectToNetworkHLE(net_info, static_cast<u8>(NWM::ConnectionType::Spectator),
+                                 dlp_password_buf);
         return;
     }
 
-    LOG_INFO(Service_DLP, "Connected to spec to network");
-
-    auto [ret, data_available_event] =
-        uds->BindHLE(dlp_bind_node_id, dlp_recv_buffer_size, dlp_broadcast_data_channel,
-                     dlp_host_network_node_id);
-    if (ret != NWM::ResultStatus::ResultSuccess) {
-        LOG_ERROR(Service_DLP, "Could not bind on node id 0x{:x}", dlp_bind_node_id);
-        return;
+    if (!pending_title_info->receiving) {
+        if (uds->GetConnectionStatusHLE().status != NWM::NetworkStatus::ConnectedAsSpectator) {
+            if (now >= pending_title_info->deadline) {
+                LOG_WARNING(Service_DLP, "Spectator connection timed out; will retry discovery");
+                CancelPendingTitleInfo();
+            }
+            return;
+        }
+        auto [ret, event] = uds->BindHLE(dlp_bind_node_id, dlp_recv_buffer_size,
+                                         dlp_broadcast_data_channel, dlp_host_network_node_id);
+        if (ret != NWM::ResultStatus::ResultSuccess) {
+            LOG_ERROR(Service_DLP, "Could not bind spectator receive channel");
+            CancelPendingTitleInfo();
+            return;
+        }
+        pending_title_info->receiving = true;
+        // Use emulated time, just like the host's periodic title broadcasts. A slower
+        // instance must not exhaust its receive window while the host is descheduled.
+        pending_title_info->deadline = now + std::chrono::seconds(1);
     }
 
-    auto aes = GenDLPChecksumKey(beacon.transmitter_address);
-
-    constexpr u32 max_beacon_recv_time_out_ms = 1000;
-
-    Common::Timer beacon_parse_timer;
-    beacon_parse_timer.Start();
-
-    std::unordered_map<int, bool> got_broadcast_packet;
-    std::unordered_map<int, std::vector<u8>> broadcast_packet_idx_buf;
-    DLP_Username server_username; // workaround before I decrypt the beacon data
+    const auto aes = GenDLPChecksumKey(pending_title_info->beacon.transmitter_address);
     std::vector<u8> recv_buf;
-    bool got_all_packets = false;
-    while (beacon_parse_timer.GetTimeElapsed().count() < max_beacon_recv_time_out_ms) {
-        if (int sz = RecvFrom(dlp_host_network_node_id, recv_buf)) {
-            auto p_head = reinterpret_cast<DLPPacketHeader*>(recv_buf.data());
-            if (!ValidatePacket(aes, p_head, sz, should_verify_checksum) ||
-                p_head->packet_index >= num_broadcast_packets) {
-                ignore_servers_list[beacon.transmitter_address] = true;
-                break; // corrupted info
-            }
-            got_broadcast_packet[p_head->packet_index] = true;
-            broadcast_packet_idx_buf[p_head->packet_index] = recv_buf;
-            if (got_broadcast_packet.size() == num_broadcast_packets) {
-                got_all_packets = true;
-                constexpr u16 nwm_host_node_network_id = 0x1;
-                server_username = uds->GetNodeInformationHLE(nwm_host_node_network_id)->username;
-                break; // we got all 5!
-            }
+    while (int size = RecvFrom(dlp_host_network_node_id, recv_buf)) {
+        auto* header = reinterpret_cast<DLPPacketHeader*>(recv_buf.data());
+        if (!ValidatePacket(aes, header, size, should_verify_checksum) ||
+            header->packet_index >= num_broadcast_packets) {
+            ignore_servers_list[pending_title_info->beacon.transmitter_address] = true;
+            CancelPendingTitleInfo();
+            return;
+        }
+        pending_title_info->packets[header->packet_index] = recv_buf;
+        if (pending_title_info->packets.size() == num_broadcast_packets) {
+            break;
         }
     }
-
-    uds->UnbindHLE(dlp_bind_node_id);
-    uds->DisconnectNetworkHLE();
-
-    if (!got_all_packets) {
-        if (!got_broadcast_packet.size()) {
-            // we didn't get ANY packet info from this server
-            // so we add it to the ignore list
-            ignore_servers_list[beacon.transmitter_address] = true;
+    if (pending_title_info->packets.size() != num_broadcast_packets) {
+        if (now >= pending_title_info->deadline) {
+            // Packet loss or a delayed host is transient, not evidence of an invalid server.
+            LOG_WARNING(Service_DLP, "Title broadcast timed out; will retry discovery");
+            CancelPendingTitleInfo();
         }
-        LOG_ERROR(Service_DLP, "Connected to beacon, but could not receive all dlp packets");
         return;
     }
+
+    const auto server_node = uds->GetNodeInformationHLE(dlp_host_network_node_id);
+    const DLP_Username server_username = server_node ? server_node->username : DLP_Username{};
+    auto completed = std::move(*pending_title_info);
+    CancelPendingTitleInfo();
+    auto& beacon = completed.beacon;
+    auto& broadcast_packet_idx_buf = completed.packets;
 
     // parse packets into cached DLPServerInfo and DLPTitleInfo
     auto broad_pk1 = reinterpret_cast<DLPBroadcastPacket1*>(broadcast_packet_idx_buf[0].data());

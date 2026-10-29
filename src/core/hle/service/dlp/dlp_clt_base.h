@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <chrono>
+#include <optional>
 #include "core/hle/kernel/event.h"
 #include "core/hle/kernel/shared_memory.h"
 #include "dlp_base.h"
@@ -77,6 +79,14 @@ protected:
     Network::MacAddress scan_mac_address_filter;
     Network::MacAddress host_mac_address;
 
+    struct PendingTitleInfo {
+        Network::WifiPacket beacon;
+        bool receiving = false;
+        std::chrono::microseconds deadline{};
+        std::map<int, std::vector<u8>> packets;
+    };
+    std::optional<PendingTitleInfo> pending_title_info;
+
     Core::TimingEventType* beacon_scan_event;
 
     std::mutex beacon_mutex;
@@ -103,6 +113,7 @@ protected:
     u32 GetCltState();
     void BeaconScanCallback(std::uintptr_t user_data, s64 cycles_late);
     void CacheBeaconTitleInfo(Network::WifiPacket& beacon);
+    void CancelPendingTitleInfo();
     int GetCachedTitleInfoIdx(Network::MacAddress mac_addr);
     bool TitleInfoIsCached(Network::MacAddress mac_addr);
     DLPServerInfo GetDLPServerInfoFromRawBeacon(Network::WifiPacket& beacon);
