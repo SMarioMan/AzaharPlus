@@ -1481,6 +1481,18 @@ GMainWindow::GMainWindow(Core::System& system_)
             continue;
         }
 
+        if (args[i] == QStringLiteral("--user") || args[i] == QStringLiteral("-u")) {
+            if (i < args.size() - 1) {
+                i++;
+            }
+            continue;
+        }
+
+        if (args[i].startsWith(QStringLiteral("--user=")) ||
+            args[i].startsWith(QStringLiteral("-u="))) {
+            continue;
+        }
+
         if (args[i] == QStringLiteral("--version") || args[i] == QStringLiteral("-v")) {
             const std::string version_string = std::string("Azahar ") + Common::g_build_fullname;
             ShowCommandOutput("Version", version_string);
@@ -5942,6 +5954,8 @@ int LaunchQtFrontend(int argc, char* argv[]) {
     auto rounding_policy = GetHighDpiRoundingPolicy();
     QApplication::setHighDpiScaleFactorRoundingPolicy(rounding_policy);
 
+    const auto initial_cwd = FileUtil::GetCurrentDir();
+
 #ifdef __APPLE__
     auto bundle_dir = FileUtil::GetBundleDirectory();
     if (bundle_dir) {
@@ -5955,6 +5969,34 @@ int LaunchQtFrontend(int argc, char* argv[]) {
 #endif
 
     QApplication app(argc, argv);
+
+    // Parse custom user directory early so config, NAND, SDMC, logs, and cache all use it
+    // before GMainWindow initializes settings or migration prompts.
+    {
+        const QStringList args = QApplication::arguments();
+        QString user_dir_arg;
+        for (int i = 1; i < args.size(); ++i) {
+            if (args[i] == QStringLiteral("-u") || args[i] == QStringLiteral("--user")) {
+                if (i + 1 < args.size()) {
+                    user_dir_arg = args[++i];
+                }
+            } else if (args[i].startsWith(QStringLiteral("-u="))) {
+                user_dir_arg = args[i].mid(3);
+            } else if (args[i].startsWith(QStringLiteral("--user="))) {
+                user_dir_arg = args[i].mid(7);
+            }
+        }
+        if (!user_dir_arg.isEmpty()) {
+            const QFileInfo user_dir_info(user_dir_arg);
+            if (user_dir_info.isRelative() && initial_cwd.has_value()) {
+                user_dir_arg =
+                    QDir(QString::fromStdString(*initial_cwd)).absoluteFilePath(user_dir_arg);
+            } else {
+                user_dir_arg = user_dir_info.absoluteFilePath();
+            }
+            FileUtil::SetUserPath(user_dir_arg.toStdString());
+        }
+    }
 
     // Required when using .qrc resources from within a static library.
     // See https://doc.qt.io/qt-5/resources.html#using-resources-in-a-library

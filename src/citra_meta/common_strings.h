@@ -25,6 +25,7 @@ constexpr char help_string[] =
     "    --room                  Utilize dedicated multiplayer room functionality (equivalent to "
     "the old citra-room executable)\n"
 #endif
+    "-u, --user [path]           Specify a custom user directory path\n"
     "-v, --version               Output version information and exit\n"
     "-w, --windowed              Start in windowed mode\n"
     "-x  [path]                  Decompress a Z3DS compressed ROM located at the given path\n"
