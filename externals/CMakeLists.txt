@@ -212,6 +212,10 @@ else()
     set(ZSTD_BUILD_SHARED OFF)
     add_subdirectory(zstd/build/cmake EXCLUDE_FROM_ALL)
 
+    if(NOT TARGET zstd::libzstd_static)
+        add_library(zstd::libzstd_static ALIAS libzstd_static)
+    endif()
+
     target_include_directories(libzstd_static INTERFACE
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/externals/zstd/lib>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/externals/zstd/lib/common>
