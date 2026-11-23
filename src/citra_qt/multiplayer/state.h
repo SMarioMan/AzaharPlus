@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <QWidget>
 #include "network/announce_multiplayer_session.h"
 #include "network/network.h"
@@ -56,6 +57,14 @@ public:
      */
     void UpdateGameList(QStandardItemModel* game_list);
 
+    /**
+     * Connects directly to a multiplayer room without showing the DirectConnect dialog.
+     * Intended for automated/CLI startup.
+     */
+    void DirectConnect(const std::string& address, u16 port, const std::string& nickname = "",
+                       const std::string& password = "", bool open_room_window = false,
+                       int max_retries = 10);
+
 public slots:
     void OnNetworkStateChanged(const Network::RoomMember::State& state);
     void OnNetworkError(const Network::RoomMember::Error& error);
@@ -92,6 +101,8 @@ private:
     Network::RoomMember::CallbackHandle<Network::RoomMember::Error> error_callback_handle;
 
     bool show_notification = false;
+    bool suppress_auto_open_room = false;
+    std::atomic<bool> suppress_connect_errors{false};
 };
 
 Q_DECLARE_METATYPE(Common::WebResult);

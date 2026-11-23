@@ -364,6 +364,8 @@ void SDLState::InitJoystick(int joystick_index) {
         return;
     }
     const std::string guid = GetGUID(sdl_joystick);
+    const char* joy_name = sdl_gamecontroller ? SDL_GameControllerName(sdl_gamecontroller)
+                                              : SDL_JoystickName(sdl_joystick);
 
     std::lock_guard lock{joystick_map_mutex};
     if (joystick_map.find(guid) == joystick_map.end()) {
@@ -372,6 +374,9 @@ void SDLState::InitJoystick(int joystick_index) {
         vec->emplace_back(joystick);
         joystick_map[guid] = vec;
         joystick_vector->emplace_back(joystick);
+        LOG_INFO(Input, "Initialized SDL {} [index={}, port=0, guid={}, name={}]",
+                 sdl_gamecontroller ? "controller" : "joystick", joystick_index, guid,
+                 joy_name ? joy_name : "unknown");
         return;
     }
 
@@ -381,12 +386,18 @@ void SDLState::InitJoystick(int joystick_index) {
     if (it != joystick_guid_list->end()) {
         (*it)->SetSDLJoystick(sdl_joystick, sdl_gamecontroller);
         joystick_vector->emplace_back(*it);
+        LOG_INFO(Input, "Reinitialized SDL {} [index={}, port={}, guid={}, name={}]",
+                 sdl_gamecontroller ? "controller" : "joystick", joystick_index, (*it)->GetPort(),
+                 guid, joy_name ? joy_name : "unknown");
         return;
     }
     const int port = static_cast<int>(joystick_guid_list->size());
     auto joystick = std::make_shared<SDLJoystick>(guid, port, sdl_joystick, sdl_gamecontroller);
     joystick_guid_list->emplace_back(joystick);
     joystick_vector->emplace_back(joystick);
+    LOG_INFO(Input, "Initialized SDL {} [index={}, port={}, guid={}, name={}]",
+             sdl_gamecontroller ? "controller" : "joystick", joystick_index, port, guid,
+             joy_name ? joy_name : "unknown");
 }
 
 void SDLState::CloseJoystick(SDL_JoystickID instance_id) {
@@ -780,12 +791,7 @@ SDLState::SDLState() {
     RegisterFactory<AnalogDevice>("sdl", std::make_shared<SDLAnalogFactory>(*this));
     RegisterFactory<MotionDevice>("sdl", std::make_shared<SDLMotionFactory>(*this));
     RegisterFactory<TouchDevice>("sdl", std::make_shared<SDLTouchFactory>(*this));
-    // If the frontend is going to manage the event loop, then we dont start one here
-    start_thread = !SDL_WasInit(SDL_INIT_GAMECONTROLLER);
-    if (start_thread && SDL_Init(SDL_INIT_GAMECONTROLLER) < 0) {
-        LOG_CRITICAL(Input, "SDL_Init(SDL_INIT_GAMECONTROLLER) failed with: {}", SDL_GetError());
-        return;
-    }
+    // Set SDL hints before SDL_Init so all joystick drivers honor background events and PS4/PS5 rumble
     if (SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1") == SDL_FALSE) {
         LOG_ERROR(Input, "Failed to set Hint for background events: {}", SDL_GetError());
     }
@@ -809,6 +815,13 @@ SDLState::SDLState() {
 #ifdef SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
 #endif
+
+    // If the frontend is going to manage the event loop, then we dont start one here
+    start_thread = !SDL_WasInit(SDL_INIT_GAMECONTROLLER);
+    if (start_thread && SDL_Init(SDL_INIT_GAMECONTROLLER) < 0) {
+        LOG_CRITICAL(Input, "SDL_Init(SDL_INIT_GAMECONTROLLER) failed with: {}", SDL_GetError());
+        return;
+    }
 
     SDL_AddEventWatch(&SDLEventWatcher, this);
 

@@ -2,11 +2,14 @@
 // Licensed under GPLv2 or any later version
 // Refer to the misc/licenses/gplv2.txt file included.
 
+#include <chrono>
+#include <thread>
 #include <QAction>
 #include <QApplication>
 #include <QIcon>
 #include <QMessageBox>
 #include <QStandardItemModel>
+#include <QtConcurrent/QtConcurrentRun>
 #include "citra_qt/multiplayer/client_room.h"
 #include "citra_qt/multiplayer/direct_connect.h"
 #include "citra_qt/multiplayer/host_room.h"
@@ -120,12 +123,18 @@ void MultiplayerState::OnNetworkStateChanged(const Network::RoomMember::State& s
     if (state == Network::RoomMember::State::Joined ||
         state == Network::RoomMember::State::Moderator) {
 
-        OnOpenNetworkRoom();
+        if (!suppress_auto_open_room) {
+            OnOpenNetworkRoom();
+        }
         status_icon->setPixmap(QIcon::fromTheme(QStringLiteral("connected")).pixmap(16));
         status_text->setText(tr("Connected"));
         leave_room->setEnabled(true);
         show_room->setEnabled(true);
     } else {
+        if (state == Network::RoomMember::State::Idle ||
+            state == Network::RoomMember::State::Uninitialized) {
+            suppress_auto_open_room = false;
+        }
         status_icon->setPixmap(QIcon::fromTheme(QStringLiteral("disconnected")).pixmap(16));
         status_text->setText(tr("Not Connected"));
         leave_room->setEnabled(false);
@@ -137,6 +146,10 @@ void MultiplayerState::OnNetworkStateChanged(const Network::RoomMember::State& s
 
 void MultiplayerState::OnNetworkError(const Network::RoomMember::Error& error) {
     LOG_DEBUG(Frontend, "Network Error: {}", Network::GetErrorStr(error));
+    if (suppress_connect_errors.load() && error == Network::RoomMember::Error::CouldNotConnect) {
+        LOG_WARNING(Frontend, "Multiplayer auto-connect attempt failed (CouldNotConnect), retrying...");
+        return;
+    }
     switch (error) {
     case Network::RoomMember::Error::LostConnection:
         NetworkMessage::ErrorManager::ShowError(NetworkMessage::ErrorManager::LOST_CONNECTION);
@@ -311,4 +324,72 @@ void MultiplayerState::UpdateGameList(QStandardItemModel* game_list) {
     if (host_room) {
         host_room->UpdateGameList(game_list);
     }
+}
+
+void MultiplayerState::DirectConnect(const std::string& address, u16 port,
+                                     const std::string& nickname, const std::string& password,
+                                     bool open_room_window, int max_retries) {
+    if (address.empty()) {
+        LOG_ERROR(Frontend, "MultiplayerState::DirectConnect called with empty address");
+        return;
+    }
+
+    std::string effective_nickname = nickname;
+    if (effective_nickname.empty()) {
+        effective_nickname = Service::CFG::GetUsername(system);
+    }
+    if (effective_nickname.empty()) {
+        effective_nickname = "Azahar";
+    }
+
+    const std::string console_id_hash = Service::CFG::GetConsoleIdHash(system);
+    const auto mac_address = Service::CFG::GetConsoleMacAddress(system);
+
+    UISettings::values.nickname = QString::fromStdString(effective_nickname);
+    UISettings::values.ip = QString::fromStdString(address);
+    UISettings::values.port = QString::number(port);
+
+    suppress_auto_open_room = !open_room_window;
+    suppress_connect_errors.store(max_retries > 1);
+
+    LOG_INFO(Frontend, "Auto-connecting to multiplayer room {}:{} as '{}'", address, port,
+             effective_nickname);
+
+    (void)QtConcurrent::run(
+        [this, address, port, effective_nickname, console_id_hash, mac_address, password,
+         max_retries]() {
+            const int attempts = std::max(1, max_retries);
+            for (int attempt = 1; attempt <= attempts; ++attempt) {
+                suppress_connect_errors.store(attempt < attempts);
+                auto room_member = Network::GetRoomMember().lock();
+                if (!room_member) {
+                    LOG_ERROR(Frontend, "RoomMember unavailable during auto-connect");
+                    break;
+                }
+                room_member->Join(effective_nickname, console_id_hash, address.c_str(), port, 0,
+                                  mac_address, password.c_str());
+                // Join() transitions asynchronously through Joining -> Joined/Moderator/Error.
+                // Wait up to 2 seconds for the handshake to settle before deciding whether to retry.
+                auto state = room_member->GetState();
+                for (int wait_step = 0;
+                     wait_step < 40 && state == Network::RoomMember::State::Joining; ++wait_step) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    state = room_member->GetState();
+                }
+                if (state == Network::RoomMember::State::Joined ||
+                    state == Network::RoomMember::State::Moderator) {
+                    LOG_INFO(Frontend, "Auto-connected to multiplayer room {}:{} as '{}'", address,
+                             port, effective_nickname);
+                    break;
+                }
+                if (attempt < attempts) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                } else {
+                    LOG_ERROR(Frontend,
+                              "Failed to auto-connect to multiplayer room {}:{} after {} attempts",
+                              address, port, attempts);
+                }
+            }
+            suppress_connect_errors.store(false);
+        });
 }

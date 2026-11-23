@@ -1375,6 +1375,36 @@ GMainWindow::GMainWindow(Core::System& system_)
     QStringList args = QApplication::arguments();
     QString game_path;
     std::optional<bool> fullscreen_override;
+    bool hide_ui_on_start = false;
+    QString room_address;
+    u16 room_port = Network::DefaultRoomPort;
+    QString room_nickname;
+    QString room_password;
+    auto parse_multiplayer_spec = [&](const QString& spec) {
+        QString addr_part = spec;
+        const int at_idx = spec.lastIndexOf(QChar::fromLatin1('@'));
+        if (at_idx >= 0) {
+            const QString user_part = spec.left(at_idx);
+            addr_part = spec.mid(at_idx + 1);
+            const int colon_idx = user_part.indexOf(QChar::fromLatin1(':'));
+            if (colon_idx >= 0) {
+                room_nickname = user_part.left(colon_idx);
+                room_password = user_part.mid(colon_idx + 1);
+            } else {
+                room_nickname = user_part;
+            }
+        }
+        const int port_colon = addr_part.lastIndexOf(QChar::fromLatin1(':'));
+        if (port_colon >= 0) {
+            bool ok = false;
+            const uint parsed_port = addr_part.mid(port_colon + 1).toUInt(&ok);
+            if (ok && parsed_port > 0 && parsed_port <= 65535) {
+                room_port = static_cast<u16>(parsed_port);
+                addr_part = addr_part.left(port_colon);
+            }
+        }
+        room_address = addr_part;
+    };
     for (int i = 1; i < args.size(); ++i) {
         // Preserves drag/drop functionality
         if (args.size() == 2 && !args[1].startsWith(QChar::fromLatin1('-'))) {
@@ -1410,6 +1440,11 @@ GMainWindow::GMainWindow(Core::System& system_)
         if (args[i] == QStringLiteral("--help") || args[i] == QStringLiteral("-h")) {
             ShowCommandOutput("Help", fmt::format(Common::help_string, args[0].toStdString()));
             exit(0);
+        }
+
+        if (args[i] == QStringLiteral("--hide-ui")) {
+            hide_ui_on_start = true;
+            continue;
         }
 
         if (args[i] == QStringLiteral("--install") || args[i] == QStringLiteral("-i")) {
@@ -1472,12 +1507,75 @@ GMainWindow::GMainWindow(Core::System& system_)
         }
 
         if (args[i] == QStringLiteral("--multiplayer") || args[i] == QStringLiteral("-m")) {
-            std::cout << "Warning: The --multiplayer option is not yet implemented for the Qt "
-                         "frontend; Ignoring."
-                      << std::endl;
-            if (i < args.size() - 1 && !args[i + 1].startsWith(QChar::fromLatin1('-'))) {
-                i++;
+            if (i < args.size() - 1) {
+                parse_multiplayer_spec(args[++i]);
             }
+            continue;
+        }
+
+        if (args[i].startsWith(QStringLiteral("--multiplayer="))) {
+            parse_multiplayer_spec(args[i].mid(14));
+            continue;
+        }
+
+        if (args[i].startsWith(QStringLiteral("-m="))) {
+            parse_multiplayer_spec(args[i].mid(3));
+            continue;
+        }
+
+        if (args[i] == QStringLiteral("--room-address")) {
+            if (i < args.size() - 1) {
+                room_address = args[++i];
+            }
+            continue;
+        }
+
+        if (args[i].startsWith(QStringLiteral("--room-address="))) {
+            room_address = args[i].mid(15);
+            continue;
+        }
+
+        if (args[i] == QStringLiteral("--room-port")) {
+            if (i < args.size() - 1) {
+                bool ok = false;
+                const uint parsed_port = args[++i].toUInt(&ok);
+                if (ok && parsed_port > 0 && parsed_port <= 65535) {
+                    room_port = static_cast<u16>(parsed_port);
+                }
+            }
+            continue;
+        }
+
+        if (args[i].startsWith(QStringLiteral("--room-port="))) {
+            bool ok = false;
+            const uint parsed_port = args[i].mid(12).toUInt(&ok);
+            if (ok && parsed_port > 0 && parsed_port <= 65535) {
+                room_port = static_cast<u16>(parsed_port);
+            }
+            continue;
+        }
+
+        if (args[i] == QStringLiteral("--room-nickname")) {
+            if (i < args.size() - 1) {
+                room_nickname = args[++i];
+            }
+            continue;
+        }
+
+        if (args[i].startsWith(QStringLiteral("--room-nickname="))) {
+            room_nickname = args[i].mid(16);
+            continue;
+        }
+
+        if (args[i] == QStringLiteral("--room-password")) {
+            if (i < args.size() - 1) {
+                room_password = args[++i];
+            }
+            continue;
+        }
+
+        if (args[i].startsWith(QStringLiteral("--room-password="))) {
+            room_password = args[i].mid(16);
             continue;
         }
 
@@ -1564,6 +1662,12 @@ GMainWindow::GMainWindow(Core::System& system_)
 
     SetDefaultUIGeometry();
     RestoreUIState();
+
+    if (hide_ui_on_start) {
+        ui->menubar->setVisible(false);
+        statusBar()->setVisible(false);
+        ui->action_Show_Status_Bar->setChecked(false);
+    }
 
     ui->action_Dump_Video->setChecked(video_dumping_on_start);
     if (fullscreen_override) {
@@ -1656,6 +1760,12 @@ GMainWindow::GMainWindow(Core::System& system_)
 #ifdef ENABLE_VULKAN
     physical_devices = GetVulkanPhysicalDevices();
 #endif
+
+    if (!room_address.isEmpty() && multiplayer_state != nullptr) {
+        multiplayer_state->DirectConnect(room_address.toStdString(), room_port,
+                                         room_nickname.toStdString(), room_password.toStdString(),
+                                         false, 15);
+    }
 
     if (!game_path.isEmpty()) {
         BootGame(game_path);
@@ -2156,6 +2266,13 @@ void GMainWindow::InitializeHotkeys() {
 
     connect_shortcut(QStringLiteral("Toggle Turbo Mode"),
                      [&] { GMainWindow::SetTurboEnabled(!GMainWindow::IsTurboEnabled()); });
+
+    connect_shortcut(QStringLiteral("Toggle Window Chrome"), [&] {
+        const bool show = !(ui->menubar->isVisible() || statusBar()->isVisible());
+        ui->menubar->setVisible(show);
+        statusBar()->setVisible(show);
+        ui->action_Show_Status_Bar->setChecked(show);
+    });
 
     connect_shortcut(QStringLiteral("Increase Speed Limit"), [&] { AdjustSpeedLimit(true); });
     connect_shortcut(QStringLiteral("Decrease Speed Limit"), [&] { AdjustSpeedLimit(false); });
