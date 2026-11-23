@@ -103,7 +103,7 @@ int DLP_Clt_Base::GetCachedTitleInfoIdx(Network::MacAddress mac_addr) {
     std::scoped_lock lock(title_info_mutex);
 
     for (int i = 0; auto& t : scanned_title_info) {
-        if (t.first.mac_addr == mac_addr) {
+        if (t.title_info.mac_addr == mac_addr) {
             return i;
         }
         i++;
@@ -192,7 +192,7 @@ void DLP_Clt_Base::GetTitleInfo(Kernel::HLERequestContext& ctx) {
     }
 
     auto c_title_idx = GetCachedTitleInfoIdx(mac_addr);
-    std::vector<u8> buffer = scanned_title_info[c_title_idx].first.ToBuffer();
+    std::vector<u8> buffer = scanned_title_info[c_title_idx].title_info.ToBuffer();
 
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 2);
     rb.Push(ResultSuccess);
@@ -218,7 +218,7 @@ void DLP_Clt_Base::GetTitleInfoInOrder(Kernel::HLERequestContext& ctx) {
         return;
     }
 
-    std::vector<u8> buffer = scanned_title_info[title_info_index].first.ToBuffer();
+    std::vector<u8> buffer = scanned_title_info[title_info_index].title_info.ToBuffer();
 
     ++title_info_index;
 
@@ -230,20 +230,27 @@ void DLP_Clt_Base::GetTitleInfoInOrder(Kernel::HLERequestContext& ctx) {
 void DLP_Clt_Base::DeleteScanInfo(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx);
 
-    LOG_INFO(Service_DLP, "Called");
-
     auto mac_addr = rp.PopRaw<Network::MacAddress>();
 
     std::scoped_lock lock(title_info_mutex);
 
-    if (!TitleInfoIsCached(mac_addr)) {
+    const int idx = GetCachedTitleInfoIdx(mac_addr);
+    LOG_INFO(Service_DLP,
+             "DeleteScanInfo mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} idx={} title_info_index={} size={}",
+             mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
+             idx, title_info_index, scanned_title_info.size());
+
+    if (idx == -1) {
         IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
         rb.Push(Result(ErrorDescription::NoData, ErrorModule::DLP, ErrorSummary::NotFound,
                        ErrorLevel::Status));
         return;
     }
 
-    scanned_title_info.erase(scanned_title_info.begin() + GetCachedTitleInfoIdx(mac_addr));
+    scanned_title_info.erase(scanned_title_info.begin() + idx);
+    if (static_cast<u32>(idx) < title_info_index) {
+        --title_info_index;
+    }
 
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
     rb.Push(ResultSuccess);
@@ -256,7 +263,8 @@ void DLP_Clt_Base::GetServerInfo(Kernel::HLERequestContext& ctx) {
 
     std::scoped_lock lock(title_info_mutex);
 
-    if (!TitleInfoIsCached(mac_addr)) {
+    const int idx = GetCachedTitleInfoIdx(mac_addr);
+    if (idx == -1) {
         IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
         rb.Push(Result(ErrorDescription::NoData, ErrorModule::DLP, ErrorSummary::NotFound,
                        ErrorLevel::Status));
@@ -265,7 +273,7 @@ void DLP_Clt_Base::GetServerInfo(Kernel::HLERequestContext& ctx) {
 
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 2);
 
-    auto buffer = scanned_title_info[GetCachedTitleInfoIdx(mac_addr)].second.ToBuffer();
+    auto buffer = scanned_title_info[idx].server_info.ToBuffer();
 
     rb.Push(ResultSuccess);
     rb.PushStaticBuffer(std::move(buffer), 0);
@@ -462,11 +470,13 @@ void DLP_Clt_Base::BeaconScanCallback(std::uintptr_t user_data, s64 cycles_late)
     if (pending_title_info) {
         CacheBeaconTitleInfo(pending_title_info->beacon);
     } else {
+        const auto now = system.CoreTiming().GetGlobalTimeUs();
         auto beacons = GetUDS()->GetReceivedBeacons(Network::BroadcastMac);
         for (auto& beacon : beacons) {
             if (auto idx = GetCachedTitleInfoIdx(beacon.transmitter_address); idx != -1) {
-                scanned_title_info[idx].second.clients_joined =
+                scanned_title_info[idx].server_info.clients_joined =
                     GetDLPServerInfoFromRawBeacon(beacon).clients_joined;
+                scanned_title_info[idx].last_seen = now;
                 continue;
             }
             if (scanned_title_info.size() >= max_title_info) {
@@ -477,6 +487,32 @@ void DLP_Clt_Base::BeaconScanCallback(std::uintptr_t user_data, s64 cycles_late)
             }
             CacheBeaconTitleInfo(beacon);
             break; // Only one spectator connection can use UDS at a time.
+        }
+
+        // Expire hosts whose beacons have stopped (e.g. host closed its room)
+        constexpr auto stale_beacon_timeout = std::chrono::seconds(4);
+        bool removed_any = false;
+        for (size_t i = 0; i < scanned_title_info.size();) {
+            if (now - scanned_title_info[i].last_seen > stale_beacon_timeout) {
+                LOG_INFO(Service_DLP,
+                         "Expired stale room mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                         scanned_title_info[i].title_info.mac_addr[0],
+                         scanned_title_info[i].title_info.mac_addr[1],
+                         scanned_title_info[i].title_info.mac_addr[2],
+                         scanned_title_info[i].title_info.mac_addr[3],
+                         scanned_title_info[i].title_info.mac_addr[4],
+                         scanned_title_info[i].title_info.mac_addr[5]);
+                scanned_title_info.erase(scanned_title_info.begin() + i);
+                if (i < title_info_index) {
+                    --title_info_index;
+                }
+                removed_any = true;
+            } else {
+                ++i;
+            }
+        }
+        if (removed_any && dlp_status_event) {
+            dlp_status_event->Signal();
         }
     }
 
@@ -565,7 +601,12 @@ void DLP_Clt_Base::CacheBeaconTitleInfo(Network::WifiPacket& incoming_beacon) {
     }
 
     const auto server_node = uds->GetNodeInformationHLE(dlp_host_network_node_id);
-    const DLP_Username server_username = server_node ? server_node->username : DLP_Username{};
+    if (!server_node || server_node->username[0] == 0) {
+        LOG_WARNING(Service_DLP, "Host node info missing or empty username; will retry discovery");
+        CancelPendingTitleInfo();
+        return;
+    }
+    const DLP_Username server_username = server_node->username;
     auto completed = std::move(*pending_title_info);
     CancelPendingTitleInfo();
     auto& beacon = completed.beacon;
@@ -616,9 +657,14 @@ void DLP_Clt_Base::CacheBeaconTitleInfo(Network::WifiPacket& incoming_beacon) {
     icon_copy_loc =
         std::copy(broad_pk4->icon_part.begin(), broad_pk4->icon_part.end(), icon_copy_loc);
 
-    LOG_INFO(Service_DLP, "Got title info");
+    LOG_INFO(Service_DLP,
+             "Got title info mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} max={} joined={} user='{}'",
+             c_server_info.mac_addr[0], c_server_info.mac_addr[1], c_server_info.mac_addr[2],
+             c_server_info.mac_addr[3], c_server_info.mac_addr[4], c_server_info.mac_addr[5],
+             c_server_info.max_clients, c_server_info.clients_joined,
+             Common::UTF16ToUTF8(DLPUsernameAsString16(c_server_info.node_info[0].username)));
 
-    scanned_title_info.emplace_back(c_title_info, c_server_info);
+    scanned_title_info.push_back(ScannedServerEntry{c_title_info, c_server_info, now});
 
     dlp_status_event->Signal();
 }
@@ -631,7 +677,9 @@ DLPServerInfo DLP_Clt_Base::GetDLPServerInfoFromRawBeacon(Network::WifiPacket& b
     NWM::NetworkInfo net_info;
 
     // find networkinfo tag
-    for (auto place = p_beacon + sizeof(NWM::BeaconFrameHeader); place < place + beacon.data.size();
+    const auto p_beacon_end = p_beacon + beacon.data.size();
+    for (auto place = p_beacon + sizeof(NWM::BeaconFrameHeader);
+         place + sizeof(NWM::TagHeader) <= p_beacon_end;
          place += reinterpret_cast<NWM::TagHeader*>(place)->length + sizeof(NWM::TagHeader)) {
         auto th = reinterpret_cast<NWM::TagHeader*>(place);
         if (th->tag_id == static_cast<u8>(NWM::TagId::VendorSpecific) &&
@@ -741,7 +789,7 @@ void DLP_Clt_Base::ClientConnectionManager() {
                         break;
                     }
 
-                    auto tinfo = scanned_title_info[GetCachedTitleInfoIdx(host_mac_address)].first;
+                    auto tinfo = scanned_title_info[GetCachedTitleInfoIdx(host_mac_address)].title_info;
 
                     dlp_units_downloaded = 0;
                     dlp_units_total = GetNumFragmentsFromTitleSize(tinfo.size);
@@ -839,7 +887,7 @@ bool DLP_Clt_Base::NeedsContentDownload(Network::MacAddress mac_addr) {
         LOG_ERROR(Service_DLP, "title info was not cached");
         return false;
     }
-    auto tinfo = scanned_title_info[GetCachedTitleInfoIdx(mac_addr)].first;
+    auto tinfo = scanned_title_info[GetCachedTitleInfoIdx(mac_addr)].title_info;
     u64 title_id = DLP_CHILD_TID_HIGH | (tinfo.unique_id << 8);
     return !FileUtil::Exists(AM::GetTitleContentPath(FS::MediaType::NAND, title_id));
 }

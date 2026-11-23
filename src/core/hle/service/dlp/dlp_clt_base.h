@@ -72,7 +72,12 @@ protected:
     bool is_scanning = false;
     constexpr static inline int beacon_scan_interval_ms = 1000;
     constexpr static inline u32 dlp_poll_rate_distribute = 0;
-    std::vector<std::pair<DLPTitleInfo, DLPServerInfo>> scanned_title_info;
+    struct ScannedServerEntry {
+        DLPTitleInfo title_info;
+        DLPServerInfo server_info;
+        std::chrono::microseconds last_seen{};
+    };
+    std::vector<ScannedServerEntry> scanned_title_info;
     std::map<Network::MacAddress, bool>
         ignore_servers_list; // ignore servers which give us bad broadcast data
     u64 scan_title_id_filter;

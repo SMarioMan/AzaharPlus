@@ -3,6 +3,7 @@
 // Refer to the misc/licenses/gplv2.txt file included.
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <memory>
 #include <system_error>
@@ -31,16 +32,39 @@
 
 namespace Service::FS {
 
+namespace {
+
+std::string NormalizePathForComparison(std::string_view input) {
+    std::string normalized(input);
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+#ifdef _WIN32
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+#endif
+    return normalized;
+}
+
+} // Anonymous namespace
+
 bool IsInstalledApplication(std::string_view path) {
-    return path.rfind(FileUtil::GetUserPath(FileUtil::UserPath::NANDDir) + "title", 0) == 0 ||
-           path.rfind(FileUtil::GetUserPath(FileUtil::UserPath::SDMCDir) + "Nintendo 3DS", 0) == 0;
+    const std::string norm_path = NormalizePathForComparison(path);
+    const std::string nand_prefix =
+        NormalizePathForComparison(FileUtil::GetUserPath(FileUtil::UserPath::NANDDir) + "title");
+    const std::string sdmc_prefix = NormalizePathForComparison(
+        FileUtil::GetUserPath(FileUtil::UserPath::SDMCDir) + "Nintendo 3DS");
+    return norm_path.rfind(nand_prefix, 0) == 0 || norm_path.rfind(sdmc_prefix, 0) == 0;
 }
 
 MediaType GetMediaTypeFromPath(std::string_view path) {
-    if (path.rfind(FileUtil::GetUserPath(FileUtil::UserPath::NANDDir) + "title", 0) == 0) {
+    const std::string norm_path = NormalizePathForComparison(path);
+    const std::string nand_prefix =
+        NormalizePathForComparison(FileUtil::GetUserPath(FileUtil::UserPath::NANDDir) + "title");
+    if (norm_path.rfind(nand_prefix, 0) == 0) {
         return MediaType::NAND;
     }
-    if (path.rfind(FileUtil::GetUserPath(FileUtil::UserPath::SDMCDir) + "Nintendo 3DS", 0) == 0) {
+    const std::string sdmc_prefix = NormalizePathForComparison(
+        FileUtil::GetUserPath(FileUtil::UserPath::SDMCDir) + "Nintendo 3DS");
+    if (norm_path.rfind(sdmc_prefix, 0) == 0) {
         return MediaType::SDMC;
     }
     return MediaType::GameCard;

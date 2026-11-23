@@ -30,6 +30,9 @@ std::shared_ptr<NWM::NWM_UDS> DLP_Base::GetUDS() {
 std::u16string DLP_Base::DLPUsernameAsString16(DLP_Username uname) {
     std::u16string strUsername;
     for (auto c : uname) {
+        if (c == 0) {
+            break;
+        }
         strUsername.push_back(c);
     }
     return strUsername;
