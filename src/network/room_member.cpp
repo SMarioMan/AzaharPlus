@@ -161,117 +161,136 @@ bool RoomMember::RoomMemberImpl::IsConnected() const {
 }
 
 void RoomMember::RoomMemberImpl::MemberLoop() {
-    // Receive packets while the connection is open
-    while (IsConnected()) {
-        std::lock_guard network_lock(network_mutex);
-        ENetEvent event;
-        if (enet_host_service(client, &event, 16) > 0) {
-            switch (event.type) {
-            case ENET_EVENT_TYPE_RECEIVE:
-                switch (event.packet->data[0]) {
-                case IdWifiPacket:
-                    HandleWifiPackets(&event);
-                    break;
-                case IdChatMessage:
-                    HandleChatPacket(&event);
-                    break;
-                case IdStatusMessage:
-                    HandleStatusMessagePacket(&event);
-                    break;
-                case IdRoomInformation:
-                    HandleRoomInformationPacket(&event);
-                    break;
-                case IdJoinSuccess:
-                case IdJoinSuccessAsMod:
-                    // The join request was successful, we are now in the room.
-                    // If we joined successfully, there must be at least one client in the room: us.
-                    ASSERT_MSG(member_information.size() > 0,
-                               "We have not yet received member information.");
-                    HandleJoinPacket(&event); // Get the MAC Address for the client
-                    if (event.packet->data[0] == IdJoinSuccessAsMod) {
-                        SetState(State::Moderator);
-                    } else {
-                        SetState(State::Joined);
-                    }
-                    break;
-                case IdModBanListResponse:
-                    HandleModBanListResponsePacket(&event);
-                    break;
-                case IdRoomIsFull:
-                    SetState(State::Idle);
-                    SetError(Error::RoomIsFull);
-                    break;
-                case IdNameCollision:
-                    SetState(State::Idle);
-                    SetError(Error::NameCollision);
-                    break;
-                case IdMacCollision:
-                    SetState(State::Idle);
-                    SetError(Error::MacCollision);
-                    break;
-                case IdConsoleIdCollision:
-                    SetState(State::Idle);
-                    SetError(Error::ConsoleIdCollision);
-                    break;
-                case IdVersionMismatch:
-                    SetState(State::Idle);
-                    SetError(Error::WrongVersion);
-                    break;
-                case IdWrongPassword:
-                    SetState(State::Idle);
-                    SetError(Error::WrongPassword);
-                    break;
-                case IdCloseRoom:
-                    SetState(State::Idle);
-                    SetError(Error::LostConnection);
-                    break;
-                case IdHostKicked:
-                    SetState(State::Idle);
-                    SetError(Error::HostKicked);
-                    break;
-                case IdHostBanned:
-                    SetState(State::Idle);
-                    SetError(Error::HostBanned);
-                    break;
-                case IdModPermissionDenied:
-                    SetError(Error::PermissionDenied);
-                    break;
-                case IdModNoSuchUser:
-                    SetError(Error::NoSuchUser);
-                    break;
-                case idAzaharPlusSpecific:
-                    HandleAzaharPlusPecificPacket(&event);
-                    break;
-                }
-                enet_packet_destroy(event.packet);
+    auto handle_event = [this](ENetEvent& event) {
+        switch (event.type) {
+        case ENET_EVENT_TYPE_RECEIVE:
+            switch (event.packet->data[0]) {
+            case IdWifiPacket:
+                HandleWifiPackets(&event);
                 break;
-            case ENET_EVENT_TYPE_DISCONNECT:
-                if (state == State::Joined || state == State::Moderator) {
-                    SetState(State::Idle);
-                    SetError(Error::LostConnection);
+            case IdChatMessage:
+                HandleChatPacket(&event);
+                break;
+            case IdStatusMessage:
+                HandleStatusMessagePacket(&event);
+                break;
+            case IdRoomInformation:
+                HandleRoomInformationPacket(&event);
+                break;
+            case IdJoinSuccess:
+            case IdJoinSuccessAsMod:
+                // The join request was successful, we are now in the room.
+                // If we joined successfully, there must be at least one client in the room: us.
+                ASSERT_MSG(member_information.size() > 0,
+                           "We have not yet received member information.");
+                HandleJoinPacket(&event); // Get the MAC Address for the client
+                if (event.packet->data[0] == IdJoinSuccessAsMod) {
+                    SetState(State::Moderator);
+                } else {
+                    SetState(State::Joined);
                 }
                 break;
-            case ENET_EVENT_TYPE_NONE:
+            case IdModBanListResponse:
+                HandleModBanListResponsePacket(&event);
                 break;
-            case ENET_EVENT_TYPE_CONNECT:
-                // The ENET_EVENT_TYPE_CONNECT event can not possibly happen here because we're
-                // already connected
-                ASSERT_MSG(false, "Received unexpected connect event while already connected");
+            case IdRoomIsFull:
+                SetState(State::Idle);
+                SetError(Error::RoomIsFull);
+                break;
+            case IdNameCollision:
+                SetState(State::Idle);
+                SetError(Error::NameCollision);
+                break;
+            case IdMacCollision:
+                SetState(State::Idle);
+                SetError(Error::MacCollision);
+                break;
+            case IdConsoleIdCollision:
+                SetState(State::Idle);
+                SetError(Error::ConsoleIdCollision);
+                break;
+            case IdVersionMismatch:
+                SetState(State::Idle);
+                SetError(Error::WrongVersion);
+                break;
+            case IdWrongPassword:
+                SetState(State::Idle);
+                SetError(Error::WrongPassword);
+                break;
+            case IdCloseRoom:
+                SetState(State::Idle);
+                SetError(Error::LostConnection);
+                break;
+            case IdHostKicked:
+                SetState(State::Idle);
+                SetError(Error::HostKicked);
+                break;
+            case IdHostBanned:
+                SetState(State::Idle);
+                SetError(Error::HostBanned);
+                break;
+            case IdModPermissionDenied:
+                SetError(Error::PermissionDenied);
+                break;
+            case IdModNoSuchUser:
+                SetError(Error::NoSuchUser);
+                break;
+            case idAzaharPlusSpecific:
+                HandleAzaharPlusPecificPacket(&event);
                 break;
             }
+            enet_packet_destroy(event.packet);
+            break;
+        case ENET_EVENT_TYPE_DISCONNECT:
+            if (state == State::Joined || state == State::Moderator) {
+                SetState(State::Idle);
+                SetError(Error::LostConnection);
+            }
+            break;
+        case ENET_EVENT_TYPE_NONE:
+            break;
+        case ENET_EVENT_TYPE_CONNECT:
+            // The ENET_EVENT_TYPE_CONNECT event can not possibly happen here because we're
+            // already connected
+            ASSERT_MSG(false, "Received unexpected connect event while already connected");
+            break;
+        }
+    };
+
+    // Receive and send packets with low latency while the connection is open
+    while (IsConnected()) {
+        std::lock_guard network_lock(network_mutex);
+
+        // Flush any queued outgoing packets immediately before waiting on incoming traffic
+        auto flush_outgoing = [&]() -> bool {
+            std::list<Packet> packets;
+            {
+                std::lock_guard send_list_lock(send_list_mutex);
+                if (send_list.empty()) {
+                    return false;
+                }
+                packets.swap(send_list);
+            }
+            for (const auto& packet : packets) {
+                ENetPacket* enetPacket = enet_packet_create(packet.GetData(), packet.GetDataSize(),
+                                                            ENET_PACKET_FLAG_RELIABLE);
+                enet_peer_send(server, 0, enetPacket);
+            }
+            enet_host_flush(client);
+            return true;
+        };
+
+        flush_outgoing();
+
+        // Drain all ready incoming events without sleeping; wait at most 1ms when idle
+        ENetEvent event;
+        int wait_ms = 1;
+        while (IsConnected() && enet_host_service(client, &event, wait_ms) > 0) {
+            handle_event(event);
+            wait_ms = 0;
         }
 
-        std::list<Packet> packets;
-        {
-            std::lock_guard send_list_lock(send_list_mutex);
-            packets.swap(send_list);
-        }
-        for (const auto& packet : packets) {
-            ENetPacket* enetPacket = enet_packet_create(packet.GetData(), packet.GetDataSize(),
-                                                        ENET_PACKET_FLAG_RELIABLE);
-            enet_peer_send(server, 0, enetPacket);
-        }
-        enet_host_flush(client);
+        flush_outgoing();
     }
     Disconnect();
 };
